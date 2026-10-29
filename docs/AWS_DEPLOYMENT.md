@@ -56,6 +56,7 @@ Deployments replace only `releases/` and `current`. They never run a database se
 | `frontend/src/runtimeConfig.js` | Reads and validates `window.APP_CONFIG`, exports `API_BASE_URL` and `backendUrl()`. |
 | `scripts/ci/check-runtime-config.mjs` | Validates a `config.js` file with the same rules the browser uses. |
 | `scripts/ci/check-frontend-dist.mjs` | Verifies `dist/` loads `/config.js` before the bundle and has no hardcoded backend address. |
+| `scripts/ci/check-workflows.mjs` | Parses the workflow files and checks their structure (jobs, runs-on, steps, pinned action versions). |
 | `scripts/ci/check-repo-safety.sh` | No `.env`, databases, uploads or keys tracked. Required files present. CI has no AWS references. |
 | `scripts/ci/run-optional-scripts.sh` | Runs `lint`/`test` npm scripts **if they exist**. Otherwise reports "not configured". |
 | `scripts/ci/smoke-test.sh` | Seeds a throwaway PostgreSQL, starts the backend, checks health/menu/auth/config.js. |
@@ -87,7 +88,7 @@ Deployments replace only `releases/` and `current`. They never run a database se
 
 1. **Frontend** — `npm ci` (from `frontend/package-lock.json`). Runs `lint`/`test` only if defined; today neither exists, so the log shows a notice saying they were *skipped, nothing was run*. Then `npm run build` (Vite), validation of `frontend/public/config.js`, and a check of the built `dist/` (config loaded first, no hardcoded backend). Uploads `dist/` as an artifact.
 2. **Backend** — `npm ci` (from `backend/package-lock.json`), `node --check` on every backend file, optional `lint`/`test`, then **a real smoke test** against a throwaway `postgres:16` service container. It runs `npm run seed` and starts `node src/server.js` with the built frontend. Then it checks `/api/health`, `/api/menu` (menu has categories), manager login (wrong → 401, right → 200), unauthenticated manager API → 401, `/uploads/` 404, `/` and `/config.js` (with `Cache-Control: no-store`).
-3. **Deployment config & repository safety** — repo hygiene (no secrets, `.env`, `*.db`, uploads or keys tracked; `.env.example` placeholders; required files; no destructive DB commands in deploy scripts; `ci.yml` has no secrets/AWS references). Also validates the production `config.js` template, runs `bash -n` on all shell scripts, checks the systemd unit's directives, runs `nginx -t` on the rendered Nginx template (in an `nginx` container), and runs `actionlint` on both workflows (workflow syntax only; its ShellCheck pass is off).
+3. **Deployment config & repository safety** — repo hygiene (no secrets, `.env`, `*.db`, uploads or keys tracked; `.env.example` placeholders; required files; no destructive DB commands in deploy scripts; `ci.yml` has no secrets/AWS references). Also validates the production `config.js` template, runs `bash -n` on all shell scripts, checks the systemd unit's directives, runs `nginx -t` on the rendered Nginx template (in an `nginx` container), and parses both workflow files and checks their structure (`scripts/ci/check-workflows.mjs`).
 
 The CI database password (`kadak_ci_only`) and manager password are throwaway values for a container that exists only during the run. They aren't real credentials.
 
