@@ -1,0 +1,176 @@
+# Kadak AirMenu — Deploy to AWS EC2 (PREPARED, NOT ACTIVE).
+#
+# Nothing deploys until ALL of these are true (see docs/AWS_DEPLOYMENT.md, Phase B):
+#   1. The repository/environment variable AWS_DEPLOY_ENABLED is set to "true".
+#   2. The "production" environment has the secrets AWS_HOST, AWS_USER,
+#      AWS_SSH_PRIVATE_KEY, AWS_SSH_KNOWN_HOSTS and AWS_DEPLOY_PATH.
+#   3. A manual run types "deploy" in the confirm box (manual runs only).
+# If any is missing the "guard" job FAILS with a list of what is missing; it
+# never reports a deployment that did not happen.
+#
+# Normal pushes to main do NOT trigger this workflow. To deploy automatically
+# after CI passes on main, uncomment the workflow_run block below (Phase B, step 9).
+name: Deploy (AWS EC2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to deploy the selected branch to the EC2 server'
+        required: true
+        default: ""
+  # workflow_run:
+  #   workflows: [CI]
+  #   types: [completed]
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false   # never interrupt a deployment half-way
+
+jobs:
+  guard:
+    name: Guard — is AWS deployment configured and requested?
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+    steps:
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
+          AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+          AWS_SSH_KNOWN_HOSTS: ${{ secrets.AWS_SSH_KNOWN_HOSTS }}
+          AWS_DEPLOY_PATH: ${{ secrets.AWS_DEPLOY_PATH }}
+        run: |
+          problems=()
+          if [ "$EVENT" = "workflow_run" ]; then
+            [ "$RUN_CONCLUSION" = "success" ] || problems+=("CI did not succeed (conclusion: ${RUN_CONCLUSION:-unknown}) — not deploying")
+            [ "$RUN_BRANCH" = "main" ] || problems+=("CI run was for branch '$RUN_BRANCH', only main deploys")
+            sha="$RUN_SHA"
+          else
+            [ "$CONFIRM" = "deploy" ] || problems+=("confirmation input must be exactly 'deploy' (got '${CONFIRM}')")
+            [ "$REF" = "refs/heads/main" ] || problems+=("only main can be deployed (selected: $REF)")
+            sha="$GITHUB_SHA"
+          fi
+          [ "$DEPLOY_ENABLED" = "true" ] || problems+=("variable AWS_DEPLOY_ENABLED is not 'true' — AWS deployment has not been activated")
+          for s in AWS_HOST AWS_USER AWS_SSH_PRIVATE_KEY AWS_SSH_KNOWN_HOSTS AWS_DEPLOY_PATH; do
+            [ -n "${!s}" ] || problems+=("secret $s is not set in the 'production' environment")
+          done
+          if [ -n "$AWS_DEPLOY_PATH" ]; then
+            case "$AWS_DEPLOY_PATH" in /|/*/|*" "*) problems+=("AWS_DEPLOY_PATH must be an absolute path like /var/www/kadak (no trailing slash, no spaces)") ;;
+              /*) ;; *) problems+=("AWS_DEPLOY_PATH must be absolute") ;; esac
+          fi
+
+          if [ "${#problems[@]}" -gt 0 ]; then
+            {
+              echo "## AWS deployment NOT performed"
+              echo "Nothing was deployed. Fix the following, then run again:"
+              for p in "${problems[@]}"; do echo "- $p"; done
+              echo
+              echo "See docs/AWS_DEPLOYMENT.md (Phase B)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            for p in "${problems[@]}"; do echo "::error::$p"; done
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "✓ deployment configured and requested for $sha"
+
+  build:
+    name: Build release bundle
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.guard.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        run: |
+          npm ci --prefix frontend
+          npm run build --prefix frontend
+          node scripts/ci/check-frontend-dist.mjs frontend/dist
+
+      - name: Package release
+        run: bash deploy/scripts/package-release.sh "${{ needs.guard.outputs.sha }}" release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release/
+          retention-days: 14
+
+  deploy:
+    name: Deploy to EC2
+    needs: [guard, build]
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      - name: Configure SSH (key + pinned host key)
+        env:
+          AWS_SSH_PRIVATE_KEY: ${{ secrets.AWS_SSH_PRIVATE_KEY }}
+          AWS_SSH_KNOWN_HOSTS: ${{ secrets.AWS_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$AWS_SSH_PRIVATE_KEY" > ~/.ssh/kadak_deploy
+          chmod 600 ~/.ssh/kadak_deploy
+          printf '%s\n' "$AWS_SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upload release and run remote deploy
+        env:
+          AWS_HOST: ${{ secrets.AWS_HOST }}
+          AWS_USER: ${{ secrets.AWS_USER }}
+          AWS_DEPLOY_PATH: ${{ secrets.AWS_DEPLOY_PATH }}
+          SHA: ${{ needs.guard.outputs.sha }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS=(-i ~/.ssh/kadak_deploy -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o ConnectTimeout=20 -o BatchMode=yes)
+          archive="$(ls release/kadak-*.tar.gz)"
+          incoming="$AWS_DEPLOY_PATH/incoming"
+          scp "${SSH_OPTS[@]}" "$archive" release/remote-deploy.sh "$AWS_USER@$AWS_HOST:$incoming/"
+          ssh "${SSH_OPTS[@]}" "$AWS_USER@$AWS_HOST" \
+            "bash '$incoming/remote-deploy.sh' --deploy-path '$AWS_DEPLOY_PATH' --archive '$incoming/$(basename "$archive")' --release-id '${SHA:0:12}'"
+
+      - name: Public health check (optional, needs variable APP_PUBLIC_URL)
+        if: ${{ vars.APP_PUBLIC_URL != '' }}
+        env:
+          APP_PUBLIC_URL: ${{ vars.APP_PUBLIC_URL }}
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS "${APP_PUBLIC_URL%/}/api/health"; then echo; echo "✓ public health check passed"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::${APP_PUBLIC_URL%/}/api/health did not return 200 (the server-side check passed; check Nginx, DNS, TLS and the security group)"
+          exit 1
+
+      - name: Remove SSH key from runner
+        if: always()
+        run: rm -f ~/.ssh/kadak_deploy
+
+      - name: Summary
+        if: success()
+        run: echo "Deployed ${{ needs.guard.outputs.sha }} to the EC2 server; server-side health check passed." >> "$GITHUB_STEP_SUMMARY"

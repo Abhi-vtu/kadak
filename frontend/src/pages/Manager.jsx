@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api, getToken, setToken } from '../api.js';
 import { logo } from '../assets.js';
+import { backendUrl } from '../runtimeConfig.js';
 import Visual from '../components/Visual.jsx';
 
 const inr = (n) => '₹' + Number(n).toLocaleString('en-IN');
@@ -267,7 +268,7 @@ function ItemModal({ item, cats, onClose, onSaved, onDelete }) {
 
           <div className="field"><label>Photo (optional)</label>
             <div className="imgpick">
-              <div className="imgprev">{image ? <img src={image} alt="" /> : (busy ? 'Uploading…' : 'No photo')}</div>
+              <div className="imgprev">{image ? <img src={backendUrl(image)} alt="" /> : (busy ? 'Uploading…' : 'No photo')}</div>
               <div className="imgbtns">
                 <button onClick={() => fileRef.current.click()}>Upload photo</button>
                 {image && <button onClick={() => setImage(null)}>Remove</button>}

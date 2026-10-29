@@ -9,6 +9,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@400;500;600;700&display=swap" />
+  <!-- Runtime config (frontend/public/config.js), not bundled by Vite. A classic
+       blocking script, so window.APP_CONFIG is set before the (deferred) module
+       bundle executes. Edit the deployed /config.js to change the API address. -->
+  <script src="/config.js"></script>
 </head>
 <body>
   <div id="root"></div>

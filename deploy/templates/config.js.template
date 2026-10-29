@@ -1,0 +1,17 @@
+// Kadak AirMenu — PRODUCTION runtime frontend configuration TEMPLATE.
+// On the server this becomes <deploy-path>/shared/config.js and is served at
+// /config.js with "Cache-Control: no-store". Edit it in place to move the API;
+// no rebuild or redeploy is needed — browsers pick it up on the next page load.
+//
+// API_BASE_URL:
+//   ""                            Recommended with the bundled Nginx config:
+//                                 the site and the API share one domain and
+//                                 Nginx proxies /api and /uploads.
+//   "https://api.YOUR_DOMAIN"     Only if the backend runs on a different host.
+//                                 No trailing slash, no "/api" suffix, and it
+//                                 must be https:// when the site is https://.
+//
+// PUBLIC FILE: never put passwords, database URLs, keys or tokens here.
+window.APP_CONFIG = {
+  API_BASE_URL: ""
+};

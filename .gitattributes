@@ -1,0 +1,7 @@
+# Files that run on Linux (CI runners, the EC2 server) must keep LF line
+# endings even when checked out on Windows, or bash/systemd/nginx reject them.
+*.sh        text eol=lf
+*.service   text eol=lf
+*.template  text eol=lf
+*.yml       text eol=lf
+.nvmrc      text eol=lf

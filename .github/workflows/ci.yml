@@ -1,0 +1,154 @@
+# Kadak AirMenu — Continuous Integration.
+# Runs on every push to main and every pull request targeting main.
+# Needs NO AWS credentials, server or production database: the backend smoke
+# test uses a throwaway PostgreSQL service container that exists only for the run.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend — install, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+        working-directory: frontend
+
+      - name: Lint / test (only if the scripts exist)
+        working-directory: frontend
+        run: bash ../scripts/ci/run-optional-scripts.sh lint test
+
+      - name: Build (vite build)
+        run: npm run build
+        working-directory: frontend
+
+      - name: Validate runtime config (frontend/public/config.js)
+        run: node scripts/ci/check-runtime-config.mjs frontend/public/config.js
+
+      - name: Validate build output is wired for runtime config
+        run: node scripts/ci/check-frontend-dist.mjs frontend/dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  backend:
+    name: Backend — install, syntax, smoke test (PostgreSQL)
+    runs-on: ubuntu-latest
+    needs: frontend
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kadak
+          POSTGRES_PASSWORD: kadak_ci_only   # throwaway container, not a real credential
+          POSTGRES_DB: kadak_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kadak -d kadak_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://kadak:kadak_ci_only@localhost:5432/kadak_ci
+      DATABASE_SSL: "false"
+      MANAGER_PASSWORD: ci-test-password-not-secret
+      APP_TZ: Asia/Kolkata
+      PORT: "4000"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies (npm ci)
+        run: npm ci
+        working-directory: backend
+
+      - name: Syntax check every backend source file
+        run: |
+          set -e
+          files=$(find backend/src backend/db -name '*.js' | sort)
+          for f in $files; do node --check "$f"; echo "  ✓ $f"; done
+
+      - name: Lint / test (only if the scripts exist)
+        working-directory: backend
+        run: bash ../scripts/ci/run-optional-scripts.sh lint test
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Smoke test (seed → start → health, menu, auth, config.js)
+        run: bash scripts/ci/smoke-test.sh
+
+  deploy-config:
+    name: Deployment config & repository safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Repository safety (no secrets, env files, databases or uploads tracked)
+        run: bash scripts/ci/check-repo-safety.sh
+
+      - name: Validate production config.js template
+        run: node scripts/ci/check-runtime-config.mjs deploy/templates/config.js.template --allow-placeholder
+
+      - name: ShellCheck deployment and CI scripts
+        run: shellcheck --severity=warning deploy/scripts/*.sh deploy/server/*.sh scripts/ci/*.sh
+
+      - name: Validate systemd unit (required directives)
+        run: |
+          set -e
+          u=deploy/systemd/kadak-backend.service
+          for d in '^\[Service\]' '^User=' '^WorkingDirectory=' '^EnvironmentFile=' '^ExecStart=' '^Restart='; do
+            grep -qE "$d" "$u" || { echo "::error file=$u::missing directive matching $d"; exit 1; }
+          done
+          echo "✓ $u has the required directives"
+
+      - name: Validate Nginx template (nginx -t in a container)
+        run: |
+          set -e
+          mkdir -p /tmp/nginx/conf.d /tmp/www/current/frontend/dist /tmp/www/shared/uploads
+          sed -e 's/__SERVER_NAME__/kadak.ci.invalid/g' -e 's#__DEPLOY_PATH__#/srv/kadak#g' \
+            deploy/nginx/kadak.conf.template > /tmp/nginx/conf.d/kadak.conf
+          if grep -n '__[A-Z_]*__' /tmp/nginx/conf.d/kadak.conf; then echo "::error::unreplaced placeholder in nginx template"; exit 1; fi
+          docker run --rm \
+            -v /tmp/nginx/conf.d:/etc/nginx/conf.d:ro \
+            -v /tmp/www:/srv/kadak:ro \
+            nginx:1.27-alpine nginx -t
+
+      - name: Lint GitHub Actions workflows (actionlint)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color

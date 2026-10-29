@@ -1,0 +1,76 @@
+# Kadak AirMenu — Nginx site (installed to /etc/nginx/conf.d/kadak.conf by
+# deploy/server/bootstrap.sh, which fills in the placeholders):
+#   __SERVER_NAME__  your domain, e.g. menu.example.com (or the server's public IP before DNS exists)
+#   __DEPLOY_PATH__  application root, e.g. /var/www/kadak
+#
+# Plain HTTP on port 80. HTTPS is added afterwards by certbot (`certbot --nginx`),
+# which edits this file to add the TLS server block and the HTTP→HTTPS redirect.
+
+upstream kadak_backend {
+    server 127.0.0.1:4000;   # must match PORT in shared/backend.env
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __SERVER_NAME__;
+
+    root __DEPLOY_PATH__/current/frontend/dist;
+    index index.html;
+
+    access_log /var/log/nginx/kadak.access.log;
+    error_log  /var/log/nginx/kadak.error.log warn;
+
+    server_tokens off;
+    client_max_body_size 8m;   # photo uploads (backend limit is 6 MB)
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # Runtime frontend config — the server's own editable copy, never cached.
+    location = /config.js {
+        alias __DEPLOY_PATH__/shared/config.js;
+        add_header Cache-Control "no-store, must-revalidate" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # API → Node backend.
+    location /api/ {
+        proxy_pass http://kadak_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+    }
+
+    # Uploaded photos — persistent directory outside the releases. File names
+    # are random UUIDs, so they are safe to cache for a long time.
+    location /uploads/ {
+        alias __DEPLOY_PATH__/shared/uploads/;
+        add_header Cache-Control "public, max-age=2592000, immutable" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # Hashed Vite bundles.
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        try_files $uri =404;
+    }
+
+    # index.html references /config.js and the current bundle names — never cache.
+    location = /index.html {
+        add_header Cache-Control "no-store, must-revalidate" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    # React Router: / and /manager are client-side routes.
+    location / {
+        try_files $uri /index.html;
+    }
+}

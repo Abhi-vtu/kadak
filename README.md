@@ -117,7 +117,19 @@ with the database** — it is the only copy of the photos.
 `npm --prefix backend run reseed-food` replaces the food side of the menu with
 `seed-data.json` in one transaction and leaves drinks untouched.
 
+## CI/CD and AWS
+
+GitHub Actions validates every push and pull request to `main`
+(`.github/workflows/ci.yml`). An AWS EC2 deployment workflow is prepared but
+switched off until a server exists. The frontend reads its API address at
+runtime from `/config.js` (`frontend/public/config.js`), so it can change
+without a rebuild. See **[docs/AWS_DEPLOYMENT.md](docs/AWS_DEPLOYMENT.md)**.
+
 ## D. Deploy to Render (free)
+
+> Note: the Render steps below and `render.yaml` predate the move to PostgreSQL +
+> local photo storage (they still mention Turso/Cloudinary). The AWS path in
+> `docs/AWS_DEPLOYMENT.md` is the maintained one.
 
 1. Push this repo to GitHub.
 2. Render → **New → Blueprint** → pick the repo. It reads `render.yaml` and

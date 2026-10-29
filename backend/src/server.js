@@ -28,10 +28,18 @@ app.use(UPLOAD_URL, (_req, res) => res.status(404).end());
 
 // Serve the built React app (frontend/dist) and let client-side routing handle /manager.
 const dist = join(__dirname, '..', '..', 'frontend', 'dist');
+// config.js is the runtime frontend config (edited in place on the server) and
+// index.html references it, so neither may be cached; hashed /assets/* can be.
+const noStore = (res) => res.setHeader('Cache-Control', 'no-store, must-revalidate');
 if (existsSync(dist)) {
-  app.use(express.static(dist));
+  app.use(express.static(dist, {
+    setHeaders: (res, path) => {
+      if (path.endsWith('config.js') || path.endsWith('index.html')) noStore(res);
+    },
+  }));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) return next();
+    noStore(res);
     res.sendFile(join(dist, 'index.html'));
   });
 }

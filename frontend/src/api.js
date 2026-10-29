@@ -1,6 +1,9 @@
-// Tiny API client. Base is same-origin in production (backend serves the app);
-// in dev, Vite proxies /api to the backend.
-const BASE = import.meta.env.VITE_API_BASE || '';
+// Tiny API client. Base comes from the runtime /config.js (see runtimeConfig.js):
+// "" means same origin — the backend or Nginx serves the app, and in dev Vite
+// proxies /api to the backend.
+import { API_BASE_URL } from './runtimeConfig.js';
+
+const BASE = API_BASE_URL || '';
 const TOKEN_KEY = 'kadak_mgr_token';
 
 export function getToken() { try { return sessionStorage.getItem(TOKEN_KEY); } catch { return null; } }

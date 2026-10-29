@@ -1,0 +1,34 @@
+# Kadak AirMenu backend — systemd unit.
+# Installed to /etc/systemd/system/kadak-backend.service by deploy/server/bootstrap.sh,
+# which replaces __DEPLOY_PATH__ (e.g. /var/www/kadak).
+# Logs: journalctl -u kadak-backend -f
+[Unit]
+Description=Kadak AirMenu backend (Node.js / Express)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kadak
+Group=kadak
+WorkingDirectory=__DEPLOY_PATH__/current/backend
+# Secrets live only here (mode 640, root:kadak), never in the repository.
+EnvironmentFile=__DEPLOY_PATH__/shared/backend.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/env node src/server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kadak-backend
+
+# Hardening: read-only filesystem except the persistent uploads directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=__DEPLOY_PATH__/shared/uploads
+
+[Install]
+WantedBy=multi-user.target

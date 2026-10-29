@@ -1,5 +1,6 @@
 import React from 'react';
 import { mono, burst, icons } from '../assets.js';
+import { backendUrl } from '../runtimeConfig.js';
 
 // The 86px (or sized) brand tile for a menu item: photo → beer crest → icon.
 export default function Visual({ item, size = 86 }) {
@@ -8,7 +9,7 @@ export default function Visual({ item, size = 86 }) {
   if (item.image_url) {
     return (
       <span className={'visual v-' + color} style={style}>
-        <img src={item.image_url} alt="" loading="lazy" />
+        <img src={backendUrl(item.image_url)} alt="" loading="lazy" />
       </span>
     );
   }
