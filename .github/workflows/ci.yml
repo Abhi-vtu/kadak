@@ -21,12 +21,12 @@ concurrency:
 jobs:
   frontend:
     name: Frontend — install, test, build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -50,7 +50,7 @@ jobs:
       - name: Validate build output is wired for runtime config
         run: node scripts/ci/check-frontend-dist.mjs frontend/dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: frontend-dist
           path: frontend/dist
@@ -58,7 +58,7 @@ jobs:
 
   backend:
     name: Backend — install, syntax, smoke test (PostgreSQL)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: frontend
     timeout-minutes: 15
     services:
@@ -79,9 +79,9 @@ jobs:
       APP_TZ: Asia/Kolkata
       PORT: "4000"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -93,15 +93,17 @@ jobs:
 
       - name: Syntax check every backend source file
         run: |
-          set -e
-          files=$(find backend/src backend/db -name '*.js' | sort)
-          for f in $files; do node --check "$f"; echo "  ✓ $f"; done
+          set -eo pipefail
+          find backend/src backend/db -name '*.js' | sort | while read -r f; do
+            node --check "$f"
+            echo "  ✓ $f"
+          done
 
       - name: Lint / test (only if the scripts exist)
         working-directory: backend
         run: bash ../scripts/ci/run-optional-scripts.sh lint test
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist
@@ -111,12 +113,12 @@ jobs:
 
   deploy-config:
     name: Deployment config & repository safety
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
 
@@ -151,4 +153,8 @@ jobs:
             nginx:1.27-alpine nginx -t
 
       - name: Lint GitHub Actions workflows (actionlint)
-        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+        # Also runs ShellCheck on every inline `run:` script. Findings are emitted
+        # as ::error annotations so they show on the run's summary page.
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 \
+            -format '{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}},col={{$err.Column}}::{{$err.Message}}{{"\n"}}{{end}}'

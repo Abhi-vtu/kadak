@@ -34,7 +34,7 @@ concurrency:
 jobs:
   guard:
     name: Guard — is AWS deployment configured and requested?
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     outputs:
       sha: ${{ steps.check.outputs.sha }}
@@ -90,13 +90,13 @@ jobs:
   build:
     name: Build release bundle
     needs: guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ needs.guard.outputs.sha }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -111,7 +111,7 @@ jobs:
       - name: Package release
         run: bash deploy/scripts/package-release.sh "${{ needs.guard.outputs.sha }}" release
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: release
           path: release/
@@ -120,11 +120,11 @@ jobs:
   deploy:
     name: Deploy to EC2
     needs: [guard, build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 20
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: release
           path: release
@@ -148,19 +148,26 @@ jobs:
           SHA: ${{ needs.guard.outputs.sha }}
         run: |
           set -euo pipefail
-          SSH_OPTS=(-i ~/.ssh/kadak_deploy -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts -o ConnectTimeout=20 -o BatchMode=yes)
-          archive="$(ls release/kadak-*.tar.gz)"
+          SSH_OPTS=(-i "$HOME/.ssh/kadak_deploy" -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$HOME/.ssh/known_hosts" -o ConnectTimeout=20 -o BatchMode=yes)
+          archives=(release/kadak-*.tar.gz)
+          if [ "${#archives[@]}" -ne 1 ] || [ ! -f "${archives[0]}" ]; then
+            echo "::error::expected exactly one release archive in release/"; exit 1
+          fi
+          archive="${archives[0]}"
           incoming="$AWS_DEPLOY_PATH/incoming"
           scp "${SSH_OPTS[@]}" "$archive" release/remote-deploy.sh "$AWS_USER@$AWS_HOST:$incoming/"
-          ssh "${SSH_OPTS[@]}" "$AWS_USER@$AWS_HOST" \
-            "bash '$incoming/remote-deploy.sh' --deploy-path '$AWS_DEPLOY_PATH' --archive '$incoming/$(basename "$archive")' --release-id '${SHA:0:12}'"
+          # Build the remote command locally, shell-quoted (values are expanded here on purpose).
+          printf -v remote_cmd 'bash %q --deploy-path %q --archive %q --release-id %q' \
+            "$incoming/remote-deploy.sh" "$AWS_DEPLOY_PATH" "$incoming/${archive##*/}" "${SHA:0:12}"
+          # shellcheck disable=SC2029
+          ssh "${SSH_OPTS[@]}" "$AWS_USER@$AWS_HOST" "$remote_cmd"
 
       - name: Public health check (optional, needs variable APP_PUBLIC_URL)
         if: ${{ vars.APP_PUBLIC_URL != '' }}
         env:
           APP_PUBLIC_URL: ${{ vars.APP_PUBLIC_URL }}
         run: |
-          for i in $(seq 1 10); do
+          for _ in $(seq 1 10); do
             if curl -fsS "${APP_PUBLIC_URL%/}/api/health"; then echo; echo "✓ public health check passed"; exit 0; fi
             sleep 3
           done
