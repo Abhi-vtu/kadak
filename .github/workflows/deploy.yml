@@ -1,28 +1,30 @@
-# Kadak AirMenu — Deploy to AWS EC2 (PREPARED, NOT ACTIVE).
+# Kadak AirMenu — Continuous Deployment to AWS EC2.
 #
-# Nothing deploys until ALL of these are true (see docs/AWS_DEPLOYMENT.md, Phase B):
-#   1. The repository/environment variable AWS_DEPLOY_ENABLED is set to "true".
-#   2. The "production" environment has the secrets AWS_HOST, AWS_USER,
-#      AWS_SSH_PRIVATE_KEY, AWS_SSH_KNOWN_HOSTS and AWS_DEPLOY_PATH.
-#   3. A manual run types "deploy" in the confirm box (manual runs only).
-# If any is missing the "guard" job FAILS with a list of what is missing; it
-# never reports a deployment that did not happen.
+# Automatic: every push to main runs CI; when CI succeeds, this workflow
+# deploys that exact commit to the EC2 server — but ONLY once the repository
+# variable AWS_DEPLOY_ENABLED is "true". Until then the automatic run is
+# skipped (shown as "skipped", nothing is contacted, nothing is reported as
+# deployed). Pull-request CI runs never deploy.
 #
-# Normal pushes to main do NOT trigger this workflow. To deploy automatically
-# after CI passes on main, uncomment the workflow_run block below (Phase B, step 9).
+# Manual: Actions → "Deploy (AWS EC2)" → Run workflow → type "deploy".
+# A manual run FAILS with a list of anything missing:
+#   - variable AWS_DEPLOY_ENABLED = "true"
+#   - "production" environment secrets AWS_HOST, AWS_USER, AWS_SSH_PRIVATE_KEY,
+#     AWS_SSH_KNOWN_HOSTS, AWS_DEPLOY_PATH
+# Setup: docs/AWS_DEPLOYMENT.md, Phase B.
 name: Deploy (AWS EC2)
 
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       confirm:
         description: 'Type "deploy" to deploy the selected branch to the EC2 server'
         required: true
         default: ""
-  # workflow_run:
-  #   workflows: [CI]
-  #   types: [completed]
-  #   branches: [main]
 
 permissions:
   contents: read
@@ -34,6 +36,13 @@ concurrency:
 jobs:
   guard:
     name: Guard — is AWS deployment configured and requested?
+    # Automatic runs: only after a successful CI run for a push to main, and only
+    # once deployment is switched on. Otherwise the whole workflow is skipped.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       vars.AWS_DEPLOY_ENABLED == 'true')
     runs-on: ubuntu-24.04
     environment: production
     outputs:
@@ -47,6 +56,7 @@ jobs:
           RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
           DEPLOY_ENABLED: ${{ vars.AWS_DEPLOY_ENABLED }}
           AWS_HOST: ${{ secrets.AWS_HOST }}
           AWS_USER: ${{ secrets.AWS_USER }}
@@ -58,6 +68,7 @@ jobs:
           if [ "$EVENT" = "workflow_run" ]; then
             [ "$RUN_CONCLUSION" = "success" ] || problems+=("CI did not succeed (conclusion: ${RUN_CONCLUSION:-unknown}) — not deploying")
             [ "$RUN_BRANCH" = "main" ] || problems+=("CI run was for branch '$RUN_BRANCH', only main deploys")
+            [ "$RUN_EVENT" = "push" ] || problems+=("CI run was triggered by '$RUN_EVENT', only pushes to main deploy")
             sha="$RUN_SHA"
           else
             [ "$CONFIRM" = "deploy" ] || problems+=("confirmation input must be exactly 'deploy' (got '${CONFIRM}')")

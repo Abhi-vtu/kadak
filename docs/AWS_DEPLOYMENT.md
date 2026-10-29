@@ -5,7 +5,7 @@ This project is deployed in two phases:
 | Phase | Status | Needs AWS? |
 |---|---|---|
 | **A — CI pipeline** | Active now. Every push and PR to `main` is built and checked. | No |
-| **B — AWS EC2 deployment** | Prepared but **switched off**. You activate it once a server exists. | Yes |
+| **B — AWS EC2 deployment** | Automatic after CI on every push to `main` — **skipped until you set `AWS_DEPLOY_ENABLED=true`** once the server exists. | Yes |
 
 Steps marked **⛔ needs AWS** can't be done until the EC2 instance (and, for HTTPS, a domain) exists.
 
@@ -49,7 +49,7 @@ Deployments replace only `releases/` and `current`. They never run a database se
 | File | Purpose |
 |---|---|
 | `.github/workflows/ci.yml` | CI: runs on push/PR to `main`. No AWS. |
-| `.github/workflows/deploy.yml` | Manual AWS deployment, guarded (inactive until Phase B). |
+| `.github/workflows/deploy.yml` | Continuous deployment: runs after CI succeeds on `main` (skipped until `AWS_DEPLOY_ENABLED=true`), plus manual runs. |
 | `.nvmrc` | Node.js major version (22) used by CI and the deploy build. |
 | `.gitattributes` | Keeps LF line endings for shell scripts, unit and templates (they run on Linux). |
 | `frontend/public/config.js` | Runtime frontend config (`window.APP_CONFIG`). Copied unbundled into `dist/`. |
@@ -87,7 +87,7 @@ Deployments replace only `releases/` and `current`. They never run a database se
 
 1. **Frontend** — `npm ci` (from `frontend/package-lock.json`). Runs `lint`/`test` only if defined; today neither exists, so the log shows a notice saying they were *skipped, nothing was run*. Then `npm run build` (Vite), validation of `frontend/public/config.js`, and a check of the built `dist/` (config loaded first, no hardcoded backend). Uploads `dist/` as an artifact.
 2. **Backend** — `npm ci` (from `backend/package-lock.json`), `node --check` on every backend file, optional `lint`/`test`, then **a real smoke test** against a throwaway `postgres:16` service container. It runs `npm run seed` and starts `node src/server.js` with the built frontend. Then it checks `/api/health`, `/api/menu` (menu has categories), manager login (wrong → 401, right → 200), unauthenticated manager API → 401, `/uploads/` 404, `/` and `/config.js` (with `Cache-Control: no-store`).
-3. **Deployment config & repository safety** — repo hygiene (no secrets, `.env`, `*.db`, uploads or keys tracked; `.env.example` placeholders; required files; no destructive DB commands in deploy scripts; `ci.yml` has no secrets/AWS references). Also validates the production `config.js` template, runs ShellCheck on all shell scripts, checks the systemd unit's directives, runs `nginx -t` on the rendered Nginx template (in an `nginx` container), and runs `actionlint` on both workflows.
+3. **Deployment config & repository safety** — repo hygiene (no secrets, `.env`, `*.db`, uploads or keys tracked; `.env.example` placeholders; required files; no destructive DB commands in deploy scripts; `ci.yml` has no secrets/AWS references). Also validates the production `config.js` template, runs `bash -n` on all shell scripts, checks the systemd unit's directives, runs `nginx -t` on the rendered Nginx template (in an `nginx` container), and runs `actionlint` on both workflows (workflow syntax only; its ShellCheck pass is off).
 
 The CI database password (`kadak_ci_only`) and manager password are throwaway values for a container that exists only during the run. They aren't real credentials.
 
@@ -192,19 +192,29 @@ Copy the `deploy/` directory to the server and run the bootstrap **once**:
 ```bash
 scp -r deploy <admin-user>@<elastic-ip>:~/kadak-deploy
 ssh <admin-user>@<elastic-ip>
-sudo bash ~/kadak-deploy/server/bootstrap.sh --distro ubuntu --deploy-user ubuntu --server-name <domain-or-elastic-ip>
+sudo bash ~/kadak-deploy/server/bootstrap.sh --distro ubuntu --deploy-user ubuntu --server-name <domain-or-elastic-ip> --with-local-postgres
 ```
 
 Replace `--distro ubuntu --deploy-user ubuntu` with `--distro amazon-linux-2023 --deploy-user ec2-user` on Amazon Linux. You can also create a dedicated `deploy` user and pass that.
 
-It installs Nginx and Node.js 22 (NodeSource), creates the `kadak` runtime user and the `/var/www/kadak` layout, writes `shared/backend.env` + `shared/config.js` from templates (only if missing), installs the systemd unit and Nginx site, and lets the deploy user restart only `kadak-backend` via sudo. It does **not** install PostgreSQL, request certificates or deploy code.
+It installs Nginx and Node.js 22 (NodeSource), creates the `kadak` runtime user and the `/var/www/kadak` layout, writes `shared/backend.env` + `shared/config.js` from templates (only if missing), installs the systemd unit and Nginx site, and lets the deploy user restart only `kadak-backend` via sudo. With `--with-local-postgres` it also installs PostgreSQL on the server (step 4). It does **not** request certificates or deploy code.
 
 ## 4. PostgreSQL connectivity ⛔ needs AWS
 
-Pick one (outstanding decision):
+**Chosen: PostgreSQL on the same EC2 instance.** Pass `--with-local-postgres` to the bootstrap and it:
 
-- **Amazon RDS for PostgreSQL (recommended):** private subnet, *Public access: No*. Its security group allows 5432 **only from the EC2 instance's security group**. In `backend.env`: `DATABASE_URL=postgres://<user>:<password>@<rds-endpoint>:5432/<db>` and `DATABASE_SSL=true`. (The backend uses TLS without CA verification — `rejectUnauthorized: false` in `backend/src/db.js`.)
-- **PostgreSQL on the same EC2 instance:** install from the distro (`apt install postgresql` / `dnf install postgresql16-server` then `postgresql-setup --initdb`). Keep it listening on localhost only and set `DATABASE_SSL=false`. Back up both the database and `shared/uploads` together.
+- installs PostgreSQL (Ubuntu: distro `postgresql`; Amazon Linux 2023: `postgresql16-server` + `postgresql-setup --initdb`, with password logins enabled for 127.0.0.1/::1);
+- leaves it listening on **localhost only** (never open 5432 in the security group);
+- creates role and database `kadak` with a random password and writes `DATABASE_URL=postgres://kadak:…@127.0.0.1:5432/kadak` and `DATABASE_SSL=false` into `shared/backend.env`. The password exists only in that file. If `backend.env` already has a real `DATABASE_URL`, nothing is changed.
+
+You still set `MANAGER_PASSWORD` yourself in `backend.env`.
+
+**Backups (do this — the database and photos now live on one disk):** e.g. a nightly cron as root:
+`sudo -u postgres pg_dump -Fc kadak > /var/backups/kadak-$(date +%F).dump`, plus `shared/uploads`, copied off the instance (S3 or EBS snapshots).
+
+Alternative, if you later move the database off the server:
+
+- **Amazon RDS for PostgreSQL:** private subnet, *Public access: No*. Its security group allows 5432 **only from the EC2 instance's security group**. In `backend.env`: `DATABASE_URL=postgres://<user>:<password>@<rds-endpoint>:5432/<db>` and `DATABASE_SSL=true`. (The backend uses TLS without CA verification — `rejectUnauthorized: false` in `backend/src/db.js`.)
 
 Edit the server's env file (never commit it):
 
@@ -293,28 +303,30 @@ gh variable set AWS_DEPLOY_ENABLED --body "true"
    - Then: `sudo certbot --nginx -d <domain>`
 4. Keep `shared/config.js` at `API_BASE_URL: ""` (same origin). If you set an absolute URL it must be `https://`.
 
-## 9. Enable the deployment workflow safely
+## 9. How deployment is triggered, and the on/off switch
 
-The guard in `deploy.yml` refuses to deploy (the run **fails**, listing what's missing) unless all of these hold:
+`deploy.yml` runs **automatically** whenever the **CI** workflow finishes for a **push to `main`** (`workflow_run` trigger):
 
-1. The run is on `main`.
-2. Variable `AWS_DEPLOY_ENABLED` is `true`.
-3. All five `production` secrets are set.
-4. For manual runs, the confirm box contains exactly `deploy`.
+| Situation | Result |
+|---|---|
+| `AWS_DEPLOY_ENABLED` not `true` (today) | Deploy run is **skipped** — nothing contacted, nothing reported as deployed. |
+| CI failed, or CI ran for a pull request | **Skipped** — only green pushes to `main` deploy. |
+| Enabled, CI green, push to `main` | Guard checks the five secrets → build → deploy that exact commit. A missing secret **fails** the run with a list. |
 
-**Automatic deploy after CI (optional, later):** in `.github/workflows/deploy.yml`, uncomment the `workflow_run:` block. From then on, every push to `main` that passes CI deploys. Turn it off instantly by setting `AWS_DEPLOY_ENABLED` to `false`.
+Manual runs (**Actions → Deploy (AWS EC2) → Run workflow**, type `deploy`) always run the guard and **fail** with a list of anything missing.
+
+Turn automatic deployment **on** by setting the variable `AWS_DEPLOY_ENABLED=true` (after steps 1–8). Turn it **off** instantly by setting it to `false` — no code change needed.
 
 ## 10. First deployment ⛔ needs AWS
 
 1. Server bootstrapped, `backend.env` filled in, database reachable.
-2. GitHub → **Actions → Deploy (AWS EC2) → Run workflow** → branch `main` → type `deploy` → Run.
+2. Set `AWS_DEPLOY_ENABLED=true`, then either push to `main` (deploys after CI passes) or GitHub → **Actions → Deploy (AWS EC2) → Run workflow** → branch `main` → type `deploy` → Run.
 3. Jobs: **guard** (config check) → **build** (frontend build + release tarball) → **deploy**. The deploy job uploads the release, runs `remote-deploy.sh`, and health-checks `http://127.0.0.1:4000/api/health` on the server (that endpoint queries the DB).
 4. Seed the database once (step 4, *First-time database setup*), then open the site and `/manager`.
 
 ## 11. Subsequent deployments
 
-- With the manual workflow: run it again, the same way, each time.
-- With `workflow_run` enabled: push to `main`. CI runs, and if it succeeds the deploy runs.
+Push to `main`. CI runs; if it passes, the deploy runs automatically for that commit. (You can still trigger one manually.)
 
 Each deploy:
 
@@ -370,9 +382,9 @@ Rollback swaps only the code. Photos, `backend.env`, `config.js` and the databas
 - [ ] AWS region, instance type, disk size; Elastic IP
 - [ ] Deploy SSH user (`ubuntu` / `ec2-user` / dedicated `deploy`)
 - [ ] How port 22 is reachable from GitHub Actions (open + key-only, GitHub IP ranges, or self-hosted runner)
-- [ ] PostgreSQL: Amazon RDS **or** local on EC2; DB name, user, password; `DATABASE_SSL`
+- [x] PostgreSQL: local on the EC2 instance (`--with-local-postgres`); still decide the backup destination
 - [ ] Domain name and DNS provider; certbot for TLS
 - [ ] Backups for the database and `shared/uploads` (snapshots / S3)
-- [ ] Manual-only deploys, or automatic after CI (`workflow_run`); required reviewers on `production`
+- [x] Automatic deploy after CI on `main` (gated by `AWS_DEPLOY_ENABLED`); optionally add required reviewers on `production`
 - [ ] Values for `AWS_HOST`, `AWS_USER`, `AWS_SSH_PRIVATE_KEY`, `AWS_SSH_KNOWN_HOSTS`, `AWS_DEPLOY_PATH`, `AWS_DEPLOY_ENABLED`, `APP_PUBLIC_URL`
 - [ ] Whether to retire `render.yaml` (it still describes an older Turso/Cloudinary setup the code no longer uses)

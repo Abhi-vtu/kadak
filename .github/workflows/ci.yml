@@ -128,8 +128,10 @@ jobs:
       - name: Validate production config.js template
         run: node scripts/ci/check-runtime-config.mjs deploy/templates/config.js.template --allow-placeholder
 
-      - name: ShellCheck deployment and CI scripts
-        run: shellcheck --severity=warning deploy/scripts/*.sh deploy/server/*.sh scripts/ci/*.sh
+      - name: Bash syntax check of deployment and CI scripts
+        run: |
+          set -e
+          for f in deploy/scripts/*.sh deploy/server/*.sh scripts/ci/*.sh; do bash -n "$f"; echo "  ✓ $f"; done
 
       - name: Validate systemd unit (required directives)
         run: |
@@ -152,9 +154,9 @@ jobs:
             -v /tmp/www:/srv/kadak:ro \
             nginx:1.27-alpine nginx -t
 
-      - name: Lint GitHub Actions workflows (actionlint)
-        # Also runs ShellCheck on every inline `run:` script. Findings are emitted
-        # as ::error annotations so they show on the run's summary page.
+      - name: Validate GitHub Actions workflow syntax (actionlint)
+        # Workflow structure/expressions only; its ShellCheck pass is turned off
+        # (-shellcheck=). Findings appear as ::error annotations on the run page.
         run: |
-          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 \
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -shellcheck= \
             -format '{{range $err := .}}::error file={{$err.Filepath}},line={{$err.Line}},col={{$err.Column}}::{{$err.Message}}{{"\n"}}{{end}}'

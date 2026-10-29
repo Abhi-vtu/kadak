@@ -4,7 +4,9 @@
 # Logs: journalctl -u kadak-backend -f
 [Unit]
 Description=Kadak AirMenu backend (Node.js / Express)
-After=network-online.target
+# postgresql.service only matters when PostgreSQL runs on this server; if it
+# doesn't exist, systemd ignores it.
+After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]

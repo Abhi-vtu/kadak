@@ -4,7 +4,7 @@
 #
 #   sudo bash bootstrap.sh --distro <ubuntu|amazon-linux-2023> \
 #        --deploy-user <ssh-user-github-uses> --server-name <domain-or-public-ip> \
-#        [--deploy-path /var/www/kadak] [--node-major 22]
+#        [--deploy-path /var/www/kadak] [--node-major 22] [--with-local-postgres]
 #
 # The distribution is an explicit choice (not guessed) and is checked against
 # /etc/os-release. Supported: Ubuntu 22.04 / 24.04 LTS, Amazon Linux 2023.
@@ -15,14 +15,19 @@
 #   2. creates the `kadak` system user that runs the backend
 #   3. creates <deploy-path>/{releases,shared,shared/uploads,incoming}
 #   4. writes shared/backend.env and shared/config.js from templates (if absent)
+#   4b. with --with-local-postgres: installs PostgreSQL on THIS server (listening
+#      on localhost only), creates role + database `kadak` with a random
+#      password, and writes DATABASE_URL into backend.env (only while it still
+#      holds the template placeholder — an existing DATABASE_URL is kept)
 #   5. installs the systemd unit and the Nginx site
 #   6. lets --deploy-user restart only the kadak-backend service via sudo
-# It does NOT install PostgreSQL, obtain TLS certificates, or deploy the app.
+# It does NOT obtain TLS certificates or deploy the app.
 set -euo pipefail
 
-DISTRO="" DEPLOY_USER="" SERVER_NAME="" DEPLOY_PATH="/var/www/kadak" NODE_MAJOR="22"
+DISTRO="" DEPLOY_USER="" SERVER_NAME="" DEPLOY_PATH="/var/www/kadak" NODE_MAJOR="22" LOCAL_PG=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --with-local-postgres) LOCAL_PG=1; shift ;;
     --distro) DISTRO="$2"; shift 2 ;;
     --deploy-user) DEPLOY_USER="$2"; shift 2 ;;
     --server-name) SERVER_NAME="$2"; shift 2 ;;
@@ -123,6 +128,47 @@ fi
 chown root:root "$DEPLOY_PATH/shared/config.js"
 chmod 644 "$DEPLOY_PATH/shared/config.js"
 
+# ---- 4b. optional: PostgreSQL on this server ----
+if [ "$LOCAL_PG" -eq 1 ]; then
+  case "$DISTRO" in
+    ubuntu)
+      log "installing PostgreSQL (apt)"
+      apt-get install -y postgresql
+      systemctl enable --now postgresql
+      ;;
+    amazon-linux-2023)
+      log "installing PostgreSQL 16 (dnf)"
+      dnf install -y postgresql16-server
+      if [ ! -f /var/lib/pgsql/data/PG_VERSION ]; then postgresql-setup --initdb; fi
+      # AL2023 defaults TCP logins to "ident"; the backend logs in with a password.
+      sed -i -E 's/^(host[[:space:]]+all[[:space:]]+all[[:space:]]+(127\.0\.0\.1\/32|::1\/128)[[:space:]]+)ident/\1scram-sha-256/' \
+        /var/lib/pgsql/data/pg_hba.conf
+      systemctl enable --now postgresql
+      systemctl reload postgresql
+      ;;
+  esac
+  # Both distributions listen on localhost only by default — keep it that way,
+  # and never open port 5432 in the security group.
+
+  pg() { (cd /tmp && sudo -u postgres psql -v ON_ERROR_STOP=1 -qtA "$@"); }
+  env_file="$DEPLOY_PATH/shared/backend.env"
+  if grep -qE '^DATABASE_URL=.*YOUR_' "$env_file"; then
+    log "creating PostgreSQL role and database 'kadak' (password generated, stored only in backend.env)"
+    pw="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"   # hex: safe in a URL, no escaping
+    pg -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kadak') THEN CREATE ROLE kadak LOGIN; END IF; END \$\$;"
+    printf "ALTER ROLE kadak WITH LOGIN PASSWORD '%s';\n" "$pw" | pg   # via stdin, not the process list
+    if [ "$(pg -c "SELECT 1 FROM pg_database WHERE datname = 'kadak'")" != "1" ]; then
+      (cd /tmp && sudo -u postgres createdb -O kadak kadak)
+    fi
+    sed -i -e "s#^DATABASE_URL=.*#DATABASE_URL=postgres://kadak:$pw@127.0.0.1:5432/kadak#" \
+           -e "s#^DATABASE_SSL=.*#DATABASE_SSL=false#" "$env_file"
+    unset pw
+    log "backend.env now points at the local database (DATABASE_SSL=false)"
+  else
+    log "backend.env already has a DATABASE_URL — left unchanged (role/database not modified)"
+  fi
+fi
+
 # ---- 5. systemd + Nginx ----
 log "installing systemd unit kadak-backend.service"
 sed "s#__DEPLOY_PATH__#$DEPLOY_PATH#g" "$SRC/systemd/kadak-backend.service" > /etc/systemd/system/kadak-backend.service
@@ -156,8 +202,8 @@ rm -f "$sudoers.tmp"
 cat <<EOF
 
 [bootstrap] Done. Server prepared at $DEPLOY_PATH. Next (docs/AWS_DEPLOYMENT.md, Phase B):
-  1. sudo nano $DEPLOY_PATH/shared/backend.env      # DATABASE_URL, DATABASE_SSL, MANAGER_PASSWORD
-  2. Create the schema + menu once (non-destructive): see "First-time database setup"
-  3. Configure the GitHub secrets/variable, then run the "Deploy (AWS EC2)" workflow
+  1. sudo nano $DEPLOY_PATH/shared/backend.env      # set MANAGER_PASSWORD (and DATABASE_URL unless --with-local-postgres filled it)
+  2. Configure the GitHub secrets + set AWS_DEPLOY_ENABLED=true; the next green push to main deploys
+  3. After the first deployment, create the schema + menu once: see "First-time database setup"
   4. After DNS points here: obtain a TLS certificate with certbot --nginx
 EOF
