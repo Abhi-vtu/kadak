@@ -1,0 +1,29 @@
+# Render Blueprint — one free web service that builds the React app and serves
+# it together with the Express API. Database is Turso (no disk needed).
+services:
+  - type: web
+    name: kadak-airmenu
+    env: node
+    plan: free
+    region: singapore
+    buildCommand: npm --prefix backend install && npm --prefix frontend install && npm --prefix frontend run build
+    startCommand: npm --prefix backend start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: MANAGER_PASSWORD
+        sync: false          # set in the Render dashboard
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      # Cloudinary — set EITHER CLOUDINARY_URL, or the three CLOUDINARY_* keys.
+      - key: CLOUDINARY_URL
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false

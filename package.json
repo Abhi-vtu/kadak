@@ -1,0 +1,14 @@
+{
+  "name": "kadak-airmenu",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Kadak AirMenu — React + Express + PostgreSQL. Guest menu + password-gated manager dashboard.",
+  "scripts": {
+    "install:all": "cd backend && npm install && cd .. && cd frontend && npm install",
+    "build": "npm --prefix frontend run build",
+    "seed": "npm --prefix backend run seed",
+    "start": "npm --prefix backend start",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev"
+  }
+}
